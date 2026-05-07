@@ -122,6 +122,16 @@ SELECT
     END AS risk_level
 FROM fraud_predictions;
 
+CREATE OR REPLACE TEMPORARY VIEW fraud_stats_5min AS
+SELECT
+    window.start, event_time, INTERVAL '5' MINUTES) AS window_start,
+    window.end, event_time, INTERVAL '5' MINUTES) AS window_end,
+    COUNT(*) AS total_transactions,
+    SUM(CASE WHEN fraud_probability > 0.5 THEN 1 ELSE 0 END) AS suspicious_count,
+    AVG(fraud_probability) AS avg_fraud_score
+FROM fraud_predictions
+GROUP BY window(event_time, INTERVAL '5' MINUTES);
+
 INSERT INTO fraud_alerts SELECT event_id,
     user_id,
     transaction_amount,

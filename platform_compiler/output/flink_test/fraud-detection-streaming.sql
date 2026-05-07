@@ -45,7 +45,8 @@ CREATE TABLE raw_events (
   user_id STRING,
   transaction_amount DOUBLE,
   merchant_id STRING,
-  event_time STRING
+  event_time STRING,
+  WATERMARK FOR event_time AS event_time - INTERVAL '10 seconds'
 ) WITH (
   'connector' = 'kafka',
   'properties.bootstrap.servers' = 'kafka-broker-1.prod.internal:9092,kafka-broker-2.prod.internal:9092,kafka-broker-3.prod.internal:9092',
@@ -139,6 +140,16 @@ SELECT
         ELSE 'LOW_RISK'
     END AS risk_level
 FROM fraud_predictions;
+
+CREATE VIEW fraud_stats_5min AS
+SELECT
+    TUMBLE_START(event_time, INTERVAL '5' MINUTES) AS window_start,
+    TUMBLE_END(event_time, INTERVAL '5' MINUTES) AS window_end,
+    COUNT(*) AS total_transactions,
+    SUM(CASE WHEN fraud_probability > 0.5 THEN 1 ELSE 0 END) AS suspicious_count,
+    AVG(fraud_probability) AS avg_fraud_score
+FROM fraud_predictions
+GROUP BY TUMBLE(event_time, INTERVAL '5' MINUTES);
 
 INSERT INTO fraud_alerts SELECT event_id,
     user_id,
