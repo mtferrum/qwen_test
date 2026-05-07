@@ -1,97 +1,140 @@
-# Platform Compiler
+# Platform Compiler for Spark + Airflow и Flink
 
-A declarative SQL-DSL compiler for generating platform-specific code for **Apache Spark** (Batch/Streaming) and **Apache Flink** (Streaming), with orchestration support for **Airflow** and **Kubernetes**.
+Платформенный компилятор для генерации кода пайплайнов обработки данных на основе SQL-DSL.
 
-Based on specifications from chat-export-1778167073196.json.
+## 📋 Обзор
 
-## Architecture
+Компилятор преобразует декларативное описание пайплайна (SQL-DSL) в исполняемый код для:
+- **Apache Spark** (Batch/Streaming) + **Airflow** для оркестрации
+- **Apache Flink** (Streaming) + **Kubernetes** для оркестрации
+
+## 🏗️ Архитектура
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  pipeline.dsl (SQL-DSL - Business Logic)                    │
-│  - DEFINE TABLE/MODEL/GRAPH                                 │
-│  - CREATE VIEW / INSERT SELECT                              │
-└─────────────────────────────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│  platform.yaml (Platform Configuration)                     │
-│  - Target: Spark/Flink, Batch/Streaming                     │
-│  - Connectors: Kafka, HDFS, S3                              │
-│  - Resources: CPU, Memory, Parallelism                      │
-│  - Orchestration: Airflow/Kubernetes                        │
-└─────────────────────────────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Platform Compiler                                          │
-│  - Parser: Extract DSL constructs                           │
-│  - Config Loader: Validate & load config                    │
-│  - Code Generator: Platform-specific output                 │
-└─────────────────────────────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Generated Artifacts                                        │
-│  - Spark: .sql + Airflow DAG (.py)                          │
-│  - Flink: .sql + K8s Deployment (.yaml)                     │
-└─────────────────────────────────────────────────────────────┘
+pipeline.dsl (SQL-DSL) ──┐
+                         ├──> Parser ──> IR ──> Code Generator ──> Platform Code
+platform.yaml (Config) ──┘
 ```
 
-## Installation
+## 📁 Структура проекта
+
+```
+platform_compiler/
+├── __init__.py              # Основной модуль
+├── compiler.py              # Главный компилятор
+├── core/
+│   ├── parser.py            # SQL-DSL парсер
+│   └── config_loader.py     # Загрузчик конфигурации YAML
+├── compilers/
+│   ├── base.py              # Базовый класс генератора
+│   ├── spark_generator.py   # Генератор Spark SQL
+│   └── flink_generator.py   # Генератор Flink SQL
+├── models/
+│   └── schemas.py           # Модели данных (Pydantic)
+├── examples/
+│   ├── pipeline.dsl         # Пример DSL описания
+│   ├── spark_batch_airflow.yaml    # Конфигурация Spark+Airflow
+│   ├── flink_streaming_k8s.yaml    # Конфигурация Flink+K8s
+│   └── validate_spark_sql.py       # Валидатор Spark SQL
+└── output/
+    ├── spark_final/         # Сгенерированный код для Spark
+    └── flink_final/         # Сгенерированный код для Flink
+```
+
+## 🚀 Быстрый старт
+
+### 1. Компиляция пайплайна
+
+```python
+from platform_compiler import compile_pipeline
+
+# Spark Batch + Airflow
+compile_pipeline(
+    dsl_path='examples/pipeline.dsl',
+    config_path='examples/spark_batch_airflow.yaml',
+    output_dir='output/spark_final'
+)
+
+# Flink Streaming + Kubernetes
+compile_pipeline(
+    dsl_path='examples/pipeline.dsl',
+    config_path='examples/flink_streaming_k8s.yaml',
+    output_dir='output/flink_final'
+)
+```
+
+### 2. Валидация сгенерированного SQL
 
 ```bash
-pip install pydantic pyyaml
+cd examples
+python validate_spark_sql.py
 ```
 
-## Quick Start
+## 📝 SQL-DSL Синтаксис
 
-### 1. Create SQL-DSL Pipeline (`pipeline.dsl`)
+### Определение источников данных
 
 ```sql
--- Define data source
 DEFINE TABLE raw_events (
     event_id STRING,
     user_id STRING,
-    amount DOUBLE,
+    transaction_amount DOUBLE,
+    merchant_id STRING,
     event_time TIMESTAMP(3)
 ) WITH STREAM (
     time_attribute = event_time,
     watermark = '10 seconds'
 );
-
--- Define ML model
-DEFINE MODEL fraud_detector (
-    path = 'hdfs:///models/fraud_v1.pkl',
-    input_schema = STRUCT<user_id STRING, amount DOUBLE>,
-    output_schema = FLOAT
-);
-
--- Business logic
-CREATE VIEW fraud_predictions AS
-SELECT
-    event_id,
-    APPLY_MODEL(fraud_detector, STRUCT(user_id, amount)) AS fraud_score
-FROM raw_events;
-
--- Windowed aggregation
-CREATE TABLE stats_5min AS
-SELECT
-    TUMBLE_START(event_time, INTERVAL '5' MINUTES) AS window_start,
-    COUNT(*) AS total_events
-FROM fraud_predictions
-GROUP BY TUMBLE(event_time, INTERVAL '5' MINUTES);
 ```
 
-### 2. Create Platform Configuration (`platform.yaml`)
+### Определение ML моделей
 
-#### Spark Batch + Airflow
+```sql
+DEFINE MODEL fraud_detector (
+    path = 'hdfs:///models/fraud_detector_v2.pkl',
+    input_schema = STRUCT<user_id STRING, amount DOUBLE, merchant_risk DOUBLE>,
+    output_schema = FLOAT
+);
+```
+
+### Трансформации
+
+```sql
+CREATE VIEW enriched_transactions AS
+SELECT
+    t.event_id,
+    t.user_id,
+    t.transaction_amount,
+    m.risk_score AS merchant_risk
+FROM raw_events t
+LEFT JOIN merchant_risk m ON t.merchant_id = m.merchant_id;
+
+CREATE VIEW fraud_predictions AS
+SELECT
+    e.event_id,
+    APPLY_MODEL(fraud_detector, 
+        STRUCT(e.user_id, e.transaction_amount, e.merchant_risk)
+    ) AS fraud_probability
+FROM enriched_transactions e;
+```
+
+### Вывод результатов
+
+```sql
+INSERT INTO fraud_alerts
+SELECT event_id, user_id, transaction_amount, fraud_probability
+FROM fraud_predictions
+WHERE fraud_probability > 0.8;
+```
+
+## ⚙️ Конфигурация (platform.yaml)
+
+### Spark Batch + Airflow
 
 ```yaml
 meta:
   name: "fraud-detection-batch"
   version: "1.0.0"
-  owner: "data-team"
 
 target:
   platform: spark
@@ -108,21 +151,18 @@ connectors:
     - name: raw_events
       type: hdfs
       config:
-        path: "hdfs:///data/events/"
+        path: "hdfs:///data/raw_events/parquet/"
         format: parquet
 
 orchestration:
   type: airflow
   schedule_interval: "0 2 * * *"
+  retries: 2
 ```
 
-#### Flink Streaming + Kubernetes
+### Flink Streaming + Kubernetes
 
 ```yaml
-meta:
-  name: "fraud-detection-streaming"
-  version: "1.0.0"
-
 target:
   platform: flink
   mode: streaming
@@ -133,7 +173,6 @@ execution:
     enabled: true
     interval: "60s"
     backend: rocksdb
-    path: "s3://checkpoints/flink/"
 
 connectors:
   sources:
@@ -141,94 +180,75 @@ connectors:
       type: kafka
       config:
         bootstrap_servers: ["kafka:9092"]
-        topic: "events-prod"
+        topic: "transactions-prod"
 
 orchestration:
   type: kubernetes
   namespace: "flink-jobs"
-  image: "flink:1.17"
+  image: "registry.company.com/flink-python:1.17"
 ```
 
-### 3. Compile
+## 📊 Сгенерированные артефакты
 
+### Для Spark
+
+- `fraud-detection-batch.sql` - Spark SQL скрипт
+- `dag_fraud_detection_batch.py` - Airflow DAG (опционально)
+
+### Для Flink
+
+- `fraud-detection-streaming.sql` - Flink SQL скрипт
+- `deployment_fraud_detection.yaml` - Kubernetes manifest (опционально)
+
+## ✅ Валидация
+
+Валидатор проверяет:
+- ✅ Структуру SQL statements
+- ✅ Соответствие таблиц источникам/приемникам
+- ✅ Регистрацию UDF
+- ✅ Корректность INSERT targets
+
+Пример вывода валидатора:
+```
+Views defined: 6
+INSERT targets: 2
+UDFs used: 1
+Errors: 0
+Warnings: 0
+
+✅ VALIDATION PASSED
+```
+
+## 🔧 Расширение
+
+### Добавление новой платформы
+
+1. Создайте класс-генератор в `compilers/`:
 ```python
-from platform_compiler import compile_pipeline
+from .base import BaseCodeGenerator
 
-outputs = compile_pipeline(
-    dsl_path='pipeline.dsl',
-    config_path='platform.yaml',
-    output_dir='./output'
-)
-
-print("Generated files:", list(outputs.keys()))
+class NewPlatformGenerator(BaseCodeGenerator):
+    def _get_platform_name(self) -> str:
+        return "new_platform"
+    
+    def generate_source_ddl(self) -> str:
+        # Реализация
+        pass
 ```
 
-## Project Structure
-
-```
-platform_compiler/
-├── __init__.py              # Package initialization
-├── compiler.py              # Main compiler orchestrator
-├── core/
-│   ├── parser.py            # SQL-DSL parser
-│   └── config_loader.py     # YAML config loader
-├── compilers/
-│   ├── base.py              # Abstract base generator
-│   ├── spark_generator.py   # Spark SQL + Airflow generator
-│   └── flink_generator.py   # Flink SQL + K8s generator
-├── models/
-│   └── schemas.py           # Pydantic data models
-├── examples/
-│   ├── pipeline.dsl         # Example DSL file
-│   ├── spark_batch_airflow.yaml
-│   └── flink_streaming_k8s.yaml
-└── output/                  # Generated artifacts
+2. Зарегистрируйте в `compiler.py`:
+```python
+if platform == 'new_platform':
+    generator = NewPlatformGenerator(self.dsl, self.config)
 ```
 
-## Supported Platforms
+## 📚 Примеры использования
 
-| Platform | Mode | Orchestration | Output |
-|----------|------|---------------|--------|
-| Spark | Batch | Airflow | `.sql` + DAG `.py` |
-| Spark | Streaming | Kubernetes | `.sql` |
-| Flink | Streaming | Kubernetes | `.sql` + K8s `.yaml` |
+Смотрите директорию `examples/`:
+- `pipeline.dsl` - полное описание пайплайна fraud detection
+- `spark_batch_airflow.yaml` - конфигурация для nightly batch пересчета
+- `flink_streaming_k8s.yaml` - конфигурация для real-time обработки
 
-## SQL-DSL Reference
+## 📄 Лицензия
 
-### DEFINE TABLE
-
-```sql
-DEFINE TABLE table_name (
-    column_name DATA_TYPE,
-    ...
-) WITH STREAM (
-    time_attribute = timestamp_column,
-    watermark = 'interval',
-    allowed_lateness = 'interval'
-);
-```
-
-### DEFINE MODEL
-
-```sql
-DEFINE MODEL model_name (
-    path = 'storage_path',
-    input_schema = schema_definition,
-    output_schema = return_type
-);
-```
-
-### Built-in Functions
-
-| Function | Type | Description |
-|----------|------|-------------|
-| `APPLY_MODEL` | UDF | Apply ML model |
-| `TUMBLE` | Window | Fixed windows |
-| `HOP` | Window | Sliding windows |
-| `SESSION` | Window | Session windows |
-| `TUMBLE_START` | Scalar | Window start time |
-| `TUMBLE_END` | Scalar | Window end time |
-
-## License
-
-MIT
+Internal use only.

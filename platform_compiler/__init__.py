@@ -9,5 +9,9 @@ Architecture:
     platform.yaml (Config) -> Config Loader -> Runtime Parameters
 """
 
+from .compiler import PlatformCompiler, compile_pipeline
+
 __version__ = "1.0.0"
 __author__ = "Data Engineering Team"
+
+__all__ = ["PlatformCompiler", "compile_pipeline"]
