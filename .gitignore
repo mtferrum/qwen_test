@@ -1,16 +1,20 @@
 ```
-# Build artifacts and output
-platform_compiler/output/
+# Erlang-specific ignores
+.eunit/
+.coverage/
+ebin/
+*.beam
+*.dump
+erl_crash.dump
 
 # Dependencies
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+rebar3/
+_rebuild/
 
 # Logs and temp files
 *.log
 *.tmp
+*.swp
 
 # Environment
 .env
@@ -23,13 +27,7 @@ __pycache__/
 *.swp
 *.swo
 
-# Coverage
-.coverage
-coverage/
-htmlcov/
-
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
+# Build artifacts
+_build/
+deps/
 ```
