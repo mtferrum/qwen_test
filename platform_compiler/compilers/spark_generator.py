@@ -1,0 +1,276 @@
+"""
+Spark SQL Code Generator
+
+Generates Spark SQL code for Batch and Structured Streaming modes.
+Includes Airflow DAG generation for orchestration.
+"""
+
+from typing import Dict, Any, List
+import json
+
+from .base import BaseCodeGenerator
+from ..models.schemas import DSLLayer, PlatformConfig
+
+
+class SparkGenerator(BaseCodeGenerator):
+    """Code generator for Apache Spark (Batch + Streaming)."""
+
+    def _get_platform_name(self) -> str:
+        return "spark"
+
+    def generate_source_ddl(self) -> str:
+        """Generate Spark source table DDL."""
+        lines = ["-- ==========================================",
+                 "-- SOURCE TABLES",
+                 "-- =========================================="]
+        
+        sources = self.config.connectors.get('sources', [])
+        
+        for table in self.dsl.tables:
+            # Find matching source connector
+            connector = None
+            for src in sources:
+                if src.get('name') == table.name:
+                    connector = src
+                    break
+            
+            if connector:
+                conn_type = connector.get('type', 'hdfs')
+                conn_config = connector.get('config', {})
+                
+                if conn_type == 'kafka':
+                    ddl = self._generate_kafka_source(table, conn_config)
+                elif conn_type in ['hdfs', 's3']:
+                    ddl = self._generate_file_source(table, conn_config)
+                else:
+                    ddl = f"-- Unsupported source type: {conn_type}"
+                
+                lines.append(ddl)
+            else:
+                # Create temporary view from schema
+                lines.append(self._create_temp_view(table))
+        
+        return '\n\n'.join(lines)
+
+    def generate_sink_ddl(self) -> str:
+        """Generate Spark sink table DDL."""
+        lines = ["-- ==========================================",
+                 "-- SINK TABLES",
+                 "-- =========================================="]
+        
+        sinks = self.config.connectors.get('sinks', [])
+        
+        for sink in sinks:
+            sink_name = sink.get('name', '')
+            conn_type = sink.get('type', 'hdfs')
+            conn_config = sink.get('config', {})
+            
+            if conn_type == 'kafka':
+                ddl = self._generate_kafka_sink(sink_name, conn_config)
+            elif conn_type in ['hdfs', 's3']:
+                ddl = self._generate_file_sink(sink_name, conn_config)
+            else:
+                ddl = f"-- Unsupported sink type: {conn_type}"
+            
+            lines.append(ddl)
+        
+        return '\n\n'.join(lines)
+
+    def generate_transformations(self) -> str:
+        """Generate transformation logic (views and queries)."""
+        lines = ["-- ==========================================",
+                 "-- TRANSFORMATIONS",
+                 "-- =========================================="]
+        
+        # Generate views
+        for view_name, query in self.dsl.views.items():
+            # Translate DSL-specific functions to Spark SQL
+            translated_query = self._translate_to_spark(query)
+            lines.append(f"CREATE OR REPLACE TEMPORARY VIEW {view_name} AS\n{translated_query};")
+        
+        # Generate insert statements
+        for insert in self.dsl.inserts:
+            translated = self._translate_to_spark(insert)
+            lines.append(translated + ";")
+        
+        return '\n\n'.join(lines)
+
+    def generate_udf_registrations(self) -> str:
+        """Generate UDF registration code for Spark."""
+        lines = ["-- ==========================================",
+                 "-- UDF/UDTF REGISTRATIONS",
+                 "-- =========================================="]
+        
+        for model in self.dsl.models:
+            # Register Python UDF for model inference
+            lines.append(f"-- Model: {model.name}")
+            lines.append(f"-- Path: {model.path}")
+            lines.append(f"-- Input: {model.input_schema}, Output: {model.output_schema}")
+            
+            # In practice, this would be a pandas_udf or regular UDF
+            lines.append(f"-- spark.udf.register('{model.name}', apply_model('{model.path}'), {model.output_schema})")
+            lines.append("")
+        
+        # Add standard UDFs for windowing functions
+        lines.append("-- Window function helpers are built-in to Spark SQL")
+        
+        return '\n\n'.join(lines)
+
+    def generate_airflow_dag(self) -> str:
+        """Generate Airflow DAG Python code for Spark job."""
+        meta = self.config.meta
+        orch = self.config.orchestration.airflow
+        
+        dag_id = meta.get('name', 'spark_pipeline').replace('-', '_')
+        
+        dag_code = f'''"""
+Airflow DAG for {meta.get('name', 'Spark Pipeline')}
+Generated by Platform Compiler
+"""
+
+from airflow import DAG
+from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
+from datetime import datetime, timedelta
+
+default_args = {{
+    'owner': '{meta.get("owner", "data-engineering")}',
+    'depends_on_past': False,
+    'email_on_failure': True,
+    'email_on_retry': False,
+    'retries': {orch.retries if orch else 2},
+    'retry_delay': timedelta(minutes=5),
+}}
+
+dag = DAG(
+    '{dag_id}',
+    default_args=default_args,
+    description='{meta.get("description", "Spark pipeline")}',
+    schedule_interval='{orch.schedule_interval if orch else "@daily"}',
+    start_date=datetime({(orch.start_date if orch else "2024-01-01").replace("-", ", ")}),
+    catchup={str(orch.catchup if orch else False).lower()},
+    tags=['spark', 'sql', '{meta.get("version", "1.0.0")}'],
+)
+
+submit_spark_job = SparkSubmitOperator(
+    task_id='run_spark_sql',
+    application='hdfs:///scripts/generated/{dag_id}.sql',
+    conf={{
+        'spark.sql.shuffle.partitions': '{self.config.execution.parallelism * 2}',
+        'spark.executor.memory': '{self.config.execution.memory.executor if self.config.execution.memory else "4g"}',
+        'spark.driver.memory': '{self.config.execution.memory.driver if self.config.execution.memory else "2g"}',
+    }},
+    verbose=True,
+    dag=dag,
+)
+'''
+        return dag_code
+
+    def _generate_kafka_source(self, table, config: Dict[str, Any]) -> str:
+        """Generate Kafka source DDL for Spark Structured Streaming."""
+        columns = ', '.join(f'{k} {self._format_type(v)}' for k, v in table.columns.items())
+        servers = ','.join(config.get('bootstrap_servers', ['localhost:9092']))
+        topic = config.get('topic', table.name)
+        format_type = config.get('format', 'json')
+        
+        if self.mode == 'streaming':
+            watermark = ''
+            if table.stream_config and table.stream_config.watermark:
+                watermark = f".withWatermark(\"{table.stream_config.time_attribute}\", \"{table.stream_config.watermark}\")"
+            
+            return f'''-- Kafka Source: {table.name}
+CREATE OR REPLACE TEMPORARY VIEW {table.name}
+USING kafka
+OPTIONS (
+  kafka.bootstrap.servers "{servers}",
+  subscribe "{topic}",
+  startingOffsets "latest",
+  failOnDataLoss "false"
+);
+
+-- Parse Kafka payload
+SELECT FROM_JSON(CAST(value AS STRING), "{columns}") AS data
+FROM {table.name}_raw{watermark};'''
+        else:
+            return f'''-- Kafka Source (Batch): {table.name}
+-- Note: Batch mode reads all available data from Kafka
+CREATE OR REPLACE TEMPORARY VIEW {table.name}
+USING kafka
+OPTIONS (
+  kafka.bootstrap.servers "{servers}",
+  subscribe "{topic}",
+  startingOffsets "earliest"
+);'''
+
+    def _generate_file_source(self, table, config: Dict[str, Any]) -> str:
+        """Generate file-based source DDL."""
+        path = config.get('path', f'/data/{table.name}')
+        format_type = config.get('format', 'parquet')
+        partition_by = config.get('partition_by', [])
+        
+        partition_clause = ''
+        if partition_by:
+            partition_clause = f'\nPARTITIONED BY ({", ".join(partition_by)})'
+        
+        return f'''-- File Source: {table.name}
+CREATE OR REPLACE TEMPORARY VIEW {table.name}
+USING {format_type}
+OPTIONS (
+  path "{path}"
+){partition_clause};'''
+
+    def _generate_kafka_sink(self, name: str, config: Dict[str, Any]) -> str:
+        """Generate Kafka sink configuration."""
+        servers = ','.join(config.get('bootstrap_servers', ['localhost:9092']))
+        topic = config.get('topic', name)
+        format_type = config.get('format', 'json')
+        
+        return f'''-- Kafka Sink: {name}
+-- Write to Kafka using:
+-- df.write
+--   .format("kafka")
+--   .option("kafka.bootstrap.servers", "{servers}")
+--   .option("topic", "{topic}")
+--   .save()'''
+
+    def _generate_file_sink(self, name: str, config: Dict[str, Any]) -> str:
+        """Generate file-based sink configuration."""
+        path = config.get('path', f'/data/{name}')
+        format_type = config.get('format', 'parquet')
+        partition_by = config.get('partition_by', [])
+        overwrite = config.get('overwrite', False)
+        
+        mode = 'overwrite' if overwrite else 'append'
+        
+        return f'''-- File Sink: {name}
+-- Write using:
+-- df.write
+--   .mode("{mode}")
+--   .format("{format_type}")''' + (f'\n-- .partitionBy({", ".join(partition_by)})' if partition_by else '') + f'''
+-- .option("path", "{path}")
+-- .save()'''
+
+    def _create_temp_view(self, table) -> str:
+        """Create temporary view from table schema."""
+        cols = ', '.join(f"CAST(NULL AS {self._format_type(t)}) AS {k}" 
+                        for k, t in table.columns.items())
+        return f"CREATE OR REPLACE TEMPORARY VIEW {table.name} AS SELECT {cols};"
+
+    def _translate_to_spark(self, query: str) -> str:
+        """Translate DSL-specific syntax to Spark SQL."""
+        # Replace DSL window functions with Spark equivalents
+        translations = [
+            ('TUMBLE_START(', 'window.start, '),
+            ('TUMBLE_END(', 'window.end, '),
+            ('TUMBLE(', 'window('),
+            ('HOP(', 'window('),
+            ('SESSION(', 'session_window('),
+            ('APPLY_MODEL(', 'apply_model('),
+            ('ENCODE_TEXT(', 'encode_text('),
+            ('LLM_GENERATE(', 'llm_generate('),
+        ]
+        
+        result = query
+        for dsl_fn, spark_fn in translations:
+            result = result.replace(dsl_fn, spark_fn)
+        
+        return result
