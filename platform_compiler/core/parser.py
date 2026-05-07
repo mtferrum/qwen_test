@@ -1,41 +1,44 @@
 """
-SQL-DSL Parser
+Парсер SQL-DSL.
 
-Parses SQL-DSL files and extracts:
-- DEFINE TABLE statements
-- DEFINE MODEL statements  
-- DEFINE GRAPH statements
-- CREATE VIEW statements
-- INSERT/CREATE TABLE AS SELECT statements
+Разбирает файлы SQL-DSL и извлекает:
+- DEFINE TABLE - определения таблиц
+- DEFINE MODEL - определения ML-моделей
+- DEFINE GRAPH - определения графов
+- CREATE VIEW - представления
+- INSERT/CREATE TABLE AS SELECT - операции вставки
 """
 
 import re
-from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
+from typing import Dict, List, Optional
 
-from ..models.schemas import (
-    DSLLayer, TableDefinition, ModelDefinition, GraphDefinition,
-    StreamConfig
-)
+from ..models.schemas import DSLLayer, TableDefinition, ModelDefinition, GraphDefinition, StreamConfig
 
 
 class DSLParser:
-    """Parser for SQL-DSL pipeline definitions."""
+    """
+    Парсер для определений пайплайнов на SQL-DSL.
+    
+    Пример использования:
+        parser = DSLParser()
+        dsl = parser.parse_file('pipeline.dsl')
+    """
 
-    # Regex patterns for DSL constructs
+    # Шаблоны регулярных выражений для конструкций DSL
+    # Паттерн для DEFINE TABLE с поддержкой вложенных скобок и WITH STREAM
     DEFINE_TABLE_PATTERN = re.compile(
-        r'DEFINE\s+TABLE\s+(\w+)\s*\((.*?)\)'
-        r'(?:\s*WITH\s+STREAM\s*\((.*?)\))?',
+        r'DEFINE\s+TABLE\s+(\w+)\s*\((.*?)\)\s*(?:WITH\s+STREAM\s*\((.*?)\))?\s*;',
         re.IGNORECASE | re.DOTALL
     )
     
     DEFINE_MODEL_PATTERN = re.compile(
-        r'DEFINE\s+MODEL\s+(\w+)\s*\((.*?)\)',
+        r'DEFINE\s+MODEL\s+(\w+)\s*\((.*?)\)\s*;',
         re.IGNORECASE | re.DOTALL
     )
     
     DEFINE_GRAPH_PATTERN = re.compile(
-        r'DEFINE\s+GRAPH\s+(\w+)\s*\((.*?)\)',
+        r'DEFINE\s+GRAPH\s+(\w+)\s*\((.*?)\)\s*;',
         re.IGNORECASE | re.DOTALL
     )
     
@@ -44,7 +47,7 @@ class DSLParser:
         re.IGNORECASE | re.DOTALL
     )
     
-    CREATE_TABLE_PATTERN = re.compile(
+    CREATE_TABLE_AS_PATTERN = re.compile(
         r'CREATE\s+TABLE\s+(\w+)\s+AS\s+(.*?)(?=CREATE\s+VIEW|CREATE\s+TABLE|INSERT|$)',
         re.IGNORECASE | re.DOTALL
     )
@@ -55,6 +58,7 @@ class DSLParser:
     )
 
     def __init__(self):
+        """Инициализация парсера."""
         self.tables: List[TableDefinition] = []
         self.models: List[ModelDefinition] = []
         self.graphs: List[GraphDefinition] = []
@@ -62,16 +66,32 @@ class DSLParser:
         self.inserts: List[str] = []
 
     def parse_file(self, file_path: str) -> DSLLayer:
-        """Parse a DSL file from path."""
+        """
+        Разбор файла DSL.
+        
+        Args:
+            file_path: Путь к файлу .dsl
+            
+        Returns:
+            Объект DSLLayer с разобранными данными
+        """
         content = Path(file_path).read_text()
         return self.parse_content(content)
 
     def parse_content(self, content: str) -> DSLLayer:
-        """Parse DSL content string."""
-        # Remove comments
+        """
+        Разбор содержимого DSL из строки.
+        
+        Args:
+            content: Строка с содержимым DSL
+            
+        Returns:
+            Объект DSLLayer с разобранными данными
+        """
+        # Удаляем комментарии
         content = self._remove_comments(content)
         
-        # Parse each construct type
+        # Парсим каждую конструкцию
         self._parse_tables(content)
         self._parse_models(content)
         self._parse_graphs(content)
@@ -87,24 +107,37 @@ class DSLParser:
         )
 
     def _remove_comments(self, content: str) -> str:
-        """Remove SQL comments (-- and /* */)."""
-        # Remove single-line comments
+        """
+        Удаление SQL-комментариев.
+        
+        Args:
+            content: Исходное содержимое
+            
+        Returns:
+            Содержимое без комментариев
+        """
+        # Однострочные комментарии (--)
         content = re.sub(r'--.*$', '', content, flags=re.MULTILINE)
-        # Remove multi-line comments
+        # Многострочные комментарии (/* */)
         content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
         return content
 
     def _parse_tables(self, content: str) -> None:
-        """Parse DEFINE TABLE statements."""
+        """
+        Разбор определений таблиц (DEFINE TABLE).
+        
+        Args:
+            content: Содержимое DSL
+        """
         for match in self.DEFINE_TABLE_PATTERN.finditer(content):
             name = match.group(1)
             columns_str = match.group(2)
             stream_str = match.group(3)
             
-            # Parse columns
+            # Парсим колонки
             columns = self._parse_columns(columns_str)
             
-            # Parse stream config if present
+            # Парсим конфигурацию стриминга если есть
             stream_config = None
             if stream_str:
                 stream_config = self._parse_stream_config(stream_str)
@@ -116,15 +149,23 @@ class DSLParser:
             ))
 
     def _parse_columns(self, columns_str: str) -> Dict[str, str]:
-        """Parse column definitions."""
+        """
+        Разбор определений колонок.
+        
+        Args:
+            columns_str: Строка с определениями колонок
+            
+        Returns:
+            Словарь {имя_колонки: тип}
+        """
         columns = {}
-        # Split by comma, but handle nested types like ARRAY<FLOAT>
+        # Разделяем по запятой, учитывая вложенные типы типа ARRAY<FLOAT>
         parts = re.split(r',(?![^<]*>)', columns_str)
         for part in parts:
             part = part.strip()
             if not part:
                 continue
-            # Match column name and type
+            # Извлекаем имя и тип колонки
             match = re.match(r'(\w+)\s+(.+)', part)
             if match:
                 col_name = match.group(1)
@@ -133,12 +174,20 @@ class DSLParser:
         return columns
 
     def _parse_stream_config(self, stream_str: str) -> StreamConfig:
-        """Parse WITH STREAM configuration."""
+        """
+        Разбор конфигурации WITH STREAM.
+        
+        Args:
+            stream_str: Строка с параметрами стриминга
+            
+        Returns:
+            Объект StreamConfig
+        """
         config = {}
-        # Extract key=value pairs
-        for match in re.finditer(r'(\w+)\s*=\s*(?:\'([^\']*)\'|(\w+))', stream_str):
-            key = match.group(1)
-            value = match.group(2) or match.group(3)
+        # Извлекаем пары ключ=значение
+        for m in re.finditer(r'(\w+)\s*=\s*(?:\'([^\']*)\'|(\w+))', stream_str):
+            key = m.group(1)
+            value = m.group(2) or m.group(3)
             config[key] = value
         
         return StreamConfig(
@@ -148,12 +197,17 @@ class DSLParser:
         )
 
     def _parse_models(self, content: str) -> None:
-        """Parse DEFINE MODEL statements."""
+        """
+        Разбор определений моделей (DEFINE MODEL).
+        
+        Args:
+            content: Содержимое DSL
+        """
         for match in self.DEFINE_MODEL_PATTERN.finditer(content):
             name = match.group(1)
             params_str = match.group(2)
             
-            # Parse model parameters
+            # Парсим параметры модели
             params = {}
             for m in re.finditer(r'(\w+)\s*=\s*(?:\'([^\']*)\'|(\w+)|(<[^>]+>))', params_str):
                 key = m.group(1)
@@ -168,20 +222,25 @@ class DSLParser:
             ))
 
     def _parse_graphs(self, content: str) -> None:
-        """Parse DEFINE GRAPH statements."""
+        """
+        Разбор определений графов (DEFINE GRAPH).
+        
+        Args:
+            content: Содержимое DSL
+        """
         for match in self.DEFINE_GRAPH_PATTERN.finditer(content):
             name = match.group(1)
             body = match.group(2)
             
-            # Extract vertices and edges
-            vertices_match = re.search(r'vertices\s*=>\s*(\w+)\s*\(([^)]+)\)', body, re.IGNORECASE)
-            edges_match = re.search(r'edges\s*=>\s*(\w+)\s*\(([^)]+)\)', body, re.IGNORECASE)
+            # Извлекаем вершины и рёбра
+            v_match = re.search(r'vertices\s*=>\s*(\w+)\s*\(([^)]+)\)', body, re.IGNORECASE)
+            e_match = re.search(r'edges\s*=>\s*(\w+)\s*\(([^)]+)\)', body, re.IGNORECASE)
             
-            if vertices_match and edges_match:
-                v_table = vertices_match.group(1)
-                v_cols = [c.strip() for c in vertices_match.group(2).split(',')]
-                e_table = edges_match.group(1)
-                e_cols = [c.strip() for c in edges_match.group(2).split(',')]
+            if v_match and e_match:
+                v_table = v_match.group(1)
+                v_cols = [c.strip() for c in v_match.group(2).split(',')]
+                e_table = e_match.group(1)
+                e_cols = [c.strip() for c in e_match.group(2).split(',')]
                 
                 self.graphs.append(GraphDefinition(
                     name=name,
@@ -193,16 +252,33 @@ class DSLParser:
                 ))
 
     def _parse_views(self, content: str) -> None:
-        """Parse CREATE VIEW statements."""
+        """
+        Разбор представлений (CREATE VIEW).
+        
+        Args:
+            content: Содержимое DSL
+        """
         for match in self.CREATE_VIEW_PATTERN.finditer(content):
             name = match.group(1)
             query = match.group(2).strip()
-            # Remove trailing semicolon if present
+            # Удаляем конечную точку с запятой
+            query = query.rstrip(';').strip()
+            self.views[name] = query
+        
+        # Также обрабатываем CREATE TABLE AS SELECT как view
+        for match in self.CREATE_TABLE_AS_PATTERN.finditer(content):
+            name = match.group(1)
+            query = match.group(2).strip()
             query = query.rstrip(';').strip()
             self.views[name] = query
 
     def _parse_inserts(self, content: str) -> None:
-        """Parse INSERT statements."""
+        """
+        Разбор INSERT операций.
+        
+        Args:
+            content: Содержимое DSL
+        """
         for match in self.INSERT_PATTERN.finditer(content):
             table = match.group(1)
             select_query = match.group(2).strip()

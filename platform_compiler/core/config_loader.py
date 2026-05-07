@@ -1,42 +1,73 @@
 """
-Platform Configuration Loader
+Загрузчик конфигурации платформы.
 
-Loads and validates platform.yaml configuration files.
+Загружает и проверяет YAML-файлы конфигурации platform.yaml.
 """
 
 import yaml
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 from ..models.schemas import (
     PlatformConfig, ExecutionConfig, CheckpointConfig, MemoryConfig,
     CPUConfig, OrchestrationConfig, AirflowConfig, KubernetesConfig,
     ResourceConfig, ResourceRequirements, ModelConfig, CachePolicy,
-    ModelRuntime, SinkSemantics
+    ModelRuntime
 )
 
 
 class ConfigLoader:
-    """Loader for platform configuration YAML files."""
+    """
+    Загрузчик для YAML-файлов конфигурации платформы.
+    
+    Пример использования:
+        loader = ConfigLoader()
+        config = loader.load_file('platform.yaml')
+        loader.validate()
+    """
 
     def __init__(self):
+        """Инициализация загрузчика."""
         self.config: Optional[PlatformConfig] = None
 
     def load_file(self, file_path: str) -> PlatformConfig:
-        """Load configuration from a YAML file."""
+        """
+        Загрузка конфигурации из YAML файла.
+        
+        Args:
+            file_path: Путь к файлу конфигурации
+            
+        Returns:
+            Объект PlatformConfig
+        """
         content = Path(file_path).read_text()
         return self.load_content(content)
 
     def load_content(self, content: str) -> PlatformConfig:
-        """Load configuration from a YAML string."""
+        """
+        Загрузка конфигурации из YAML строки.
+        
+        Args:
+            content: Строка с YAML содержимым
+            
+        Returns:
+            Объект PlatformConfig
+        """
         data = yaml.safe_load(content)
         self.config = self._parse_config(data)
         return self.config
 
     def _parse_config(self, data: Dict[str, Any]) -> PlatformConfig:
-        """Parse raw dictionary into PlatformConfig model."""
+        """
+        Разбор сырого словаря в модель PlatformConfig.
         
-        # Parse execution config
+        Args:
+            data: Словарь с данными конфигурации
+            
+        Returns:
+            Объект PlatformConfig
+        """
+        # Парсим конфигурацию выполнения
         exec_data = data.get('execution', {})
         checkpoint_data = exec_data.get('checkpointing', {})
         memory_data = exec_data.get('memory', {})
@@ -61,7 +92,7 @@ class ConfigLoader:
             cpu=CPUConfig(cores=cpu_data.get('cores', 2)) if cpu_data else None
         )
         
-        # Parse orchestration config
+        # Парсим конфигурацию оркестрации
         orch_data = data.get('orchestration', {})
         orch_type = orch_data.get('type', 'native').lower()
         
@@ -100,14 +131,14 @@ class ConfigLoader:
             )
         
         orchestration = OrchestrationConfig(
-            type=orch_type,  # Already uppercase from .upper()
+            type=orch_type,
             image=orch_data.get('image'),
             airflow=airflow_cfg,
             kubernetes=k8s_cfg,
             env_vars=orch_data.get('env_vars')
         )
         
-        # Parse models
+        # Парсим модели
         models = []
         for m in data.get('models', []):
             models.append(ModelConfig(
@@ -118,7 +149,7 @@ class ConfigLoader:
                 storage_path=m.get('storage_path', '')
             ))
         
-        # Build final config
+        # Собираем финальную конфигурацию
         return PlatformConfig(
             meta=data.get('meta', {}),
             target=data.get('target', {}),
@@ -129,19 +160,43 @@ class ConfigLoader:
         )
 
     def get_platform(self) -> str:
-        """Get target platform name."""
+        """
+        Получение имени целевой платформы.
+        
+        Returns:
+            Имя платформы (spark, flink, yql)
+            
+        Raises:
+            ValueError: Если конфигурация не загружена
+        """
         if not self.config:
             raise ValueError("Configuration not loaded")
         return self.config.target.get('platform', 'spark')
 
     def get_mode(self) -> str:
-        """Get execution mode."""
+        """
+        Получение режима выполнения.
+        
+        Returns:
+            Режим (batch, streaming)
+            
+        Raises:
+            ValueError: Если конфигурация не загружена
+        """
         if not self.config:
             raise ValueError("Configuration not loaded")
         return self.config.target.get('mode', 'batch')
 
     def validate(self) -> bool:
-        """Validate configuration consistency."""
+        """
+        Проверка согласованности конфигурации.
+        
+        Returns:
+            True если конфигурация валидна
+            
+        Raises:
+            ValueError: Если найдены ошибки валидации
+        """
         if not self.config:
             return False
         
@@ -149,14 +204,14 @@ class ConfigLoader:
         platform = target.get('platform', '').lower()
         mode = target.get('mode', '').lower()
         
-        # Validate platform/mode combinations
+        # Проверяем поддерживаемые комбинации платформа/режим
         if platform not in ['spark', 'flink', 'yql']:
             raise ValueError(f"Unsupported platform: {platform}")
         
         if mode not in ['batch', 'streaming']:
             raise ValueError(f"Unsupported mode: {mode}")
         
-        # Flink streaming requires checkpointing for exactly-once
+        # Flink streaming требует включенного чекпоинтирования для exactly-once
         if platform == 'flink' and mode == 'streaming':
             if self.config.execution.checkpointing:
                 if not self.config.execution.checkpointing.enabled:

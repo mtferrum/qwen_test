@@ -4,11 +4,11 @@ Models module for Platform Compiler.
 
 from .schemas import (
     # DSL Models
-    DataType, StreamConfig, TableDefinition, ModelDefinition,
+    StreamConfig, TableDefinition, ModelDefinition,
     GraphDefinition, DSLLayer,
     
     # Platform Config Models
-    PlatformType, ExecutionMode, CheckpointBackend, CheckpointConfig,
+    CheckpointBackend, CheckpointConfig,
     MemoryConfig, CPUConfig, ExecutionConfig, ConnectorType, KafkaConfig,
     FileSystemConfig, YTTableConfig, SourceConnector, SinkSemantics,
     SinkConnector, ModelRuntime, CachePolicy, ModelConfig,
@@ -18,11 +18,11 @@ from .schemas import (
 
 __all__ = [
     # DSL Models
-    'DataType', 'StreamConfig', 'TableDefinition', 'ModelDefinition',
+    'StreamConfig', 'TableDefinition', 'ModelDefinition',
     'GraphDefinition', 'DSLLayer',
     
     # Platform Config Models
-    'PlatformType', 'ExecutionMode', 'CheckpointBackend', 'CheckpointConfig',
+    'CheckpointBackend', 'CheckpointConfig',
     'MemoryConfig', 'CPUConfig', 'ExecutionConfig', 'ConnectorType',
     'KafkaConfig', 'FileSystemConfig', 'YTTableConfig', 'SourceConnector',
     'SinkSemantics', 'SinkConnector', 'ModelRuntime', 'CachePolicy',

@@ -1,7 +1,9 @@
 """
-Core models for the Platform Compiler.
+Модели данных для Platform Compiler.
 
-Based on the SQL-DSL and Platform Configuration specifications from chat-export-1778167073196.json
+Определяет структуры данных для:
+- SQL-DSL (бизнес-логика пайплайна)
+- Конфигурации платформы (инфраструктура)
 """
 
 from enum import Enum
@@ -9,41 +11,48 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
-# ============================================================================
-# SQL-DSL Models (Business Logic Layer)
-# ============================================================================
-
-class DataType(str, Enum):
-    """Supported SQL data types."""
-    STRING = "STRING"
-    INT = "INT"
-    BIGINT = "BIGINT"
-    DOUBLE = "DOUBLE"
-    FLOAT = "FLOAT"
-    BOOLEAN = "BOOLEAN"
-    TIMESTAMP = "TIMESTAMP"
-    DATE = "DATE"
-    ARRAY = "ARRAY"
-    MAP = "MAP"
-    STRUCT = "STRUCT"
-
+# ==============================================================================
+# Модели SQL-DSL (уровень бизнес-логики)
+# ==============================================================================
 
 class StreamConfig(BaseModel):
-    """Configuration for streaming tables."""
+    """
+    Конфигурация для стриминговых таблиц.
+    
+    Attributes:
+        time_attribute: Имя колонки времени для оконных операций
+        watermark: Допустимая задержка данных (например, '5 seconds')
+        allowed_lateness: Дополнительная задержка для поздних данных
+    """
     time_attribute: str
     watermark: Optional[str] = None
     allowed_lateness: Optional[str] = None
 
 
 class TableDefinition(BaseModel):
-    """DEFINE TABLE construct."""
+    """
+    Определение таблицы (DEFINE TABLE).
+    
+    Attributes:
+        name: Имя таблицы
+        columns: Словарь {имя_колонки: тип_данных}
+        stream_config: Настройки стриминга (опционально)
+    """
     name: str
-    columns: Dict[str, str]  # column_name -> data_type
+    columns: Dict[str, str]
     stream_config: Optional[StreamConfig] = None
 
 
 class ModelDefinition(BaseModel):
-    """DEFINE MODEL construct."""
+    """
+    Определение ML-модели (DEFINE MODEL).
+    
+    Attributes:
+        name: Имя модели
+        path: Путь к файлу модели
+        input_schema: Схема входных данных
+        output_schema: Схема выходных данных
+    """
     name: str
     path: str
     input_schema: str
@@ -51,7 +60,17 @@ class ModelDefinition(BaseModel):
 
 
 class GraphDefinition(BaseModel):
-    """DEFINE GRAPH construct."""
+    """
+    Определение графа (DEFINE GRAPH).
+    
+    Attributes:
+        name: Имя графа
+        vertices_table: Таблица вершин
+        vertices_id_col: Колонка ID вершины
+        edges_table: Таблица рёбер
+        edges_src_col: Колонка ID источника
+        edges_dst_col: Колонка ID назначения
+    """
     name: str
     vertices_table: str
     vertices_id_col: str
@@ -61,39 +80,45 @@ class GraphDefinition(BaseModel):
 
 
 class DSLLayer(BaseModel):
-    """Complete SQL-DSL pipeline definition."""
+    """
+    Полное определение пайплайна на SQL-DSL.
+    
+    Attributes:
+        tables: Список определённых таблиц
+        models: Список ML-моделей
+        graphs: Список графов
+        views: Словарь {имя_представления: SQL-запрос}
+        inserts: Список INSERT-операций
+    """
     tables: List[TableDefinition] = []
     models: List[ModelDefinition] = []
     graphs: List[GraphDefinition] = []
-    views: Dict[str, str] = {}  # view_name -> sql_query
+    views: Dict[str, str] = {}
     inserts: List[str] = []
 
 
-# ============================================================================
-# Platform Configuration Models (Infrastructure Layer)
-# ============================================================================
 
-class PlatformType(str, Enum):
-    """Target execution platform."""
-    SPARK = "spark"
-    FLINK = "flink"
-    YQL = "yql"
-
-
-class ExecutionMode(str, Enum):
-    """Processing mode."""
-    BATCH = "batch"
-    STREAMING = "streaming"
-
+# ==============================================================================
+# Модели конфигурации платформы (уровень инфраструктуры)
+# ==============================================================================
 
 class CheckpointBackend(str, Enum):
-    """Checkpoint storage backend."""
+    """Бэкенд для хранения чекпоинтов."""
     ROCKSDB = "rocksdb"
     FS = "fs"
 
 
 class CheckpointConfig(BaseModel):
-    """Checkpointing configuration."""
+    """
+    Конфигурация чекпоинтов.
+    
+    Attributes:
+        enabled: Включено ли чекпоинтирование
+        interval: Интервал между чекпоинтами
+        backend: Бэкенд хранения
+        path: Путь к хранилищу чекпоинтов
+        num_retained: Количество сохраняемых чекпоинтов
+    """
     enabled: bool = False
     interval: Optional[str] = None
     backend: Optional[CheckpointBackend] = None
@@ -102,7 +127,16 @@ class CheckpointConfig(BaseModel):
 
 
 class MemoryConfig(BaseModel):
-    """Memory configuration."""
+    """
+    Конфигурация памяти.
+    
+    Attributes:
+        driver: Память драйвера (Spark)
+        executor: Память исполнителя (Spark)
+        taskmanager: Память TaskManager (Flink)
+        jobmanager: Память JobManager (Flink)
+        per_slot: Память на слот
+    """
     driver: Optional[str] = None
     executor: Optional[str] = None
     taskmanager: Optional[str] = None
@@ -111,12 +145,25 @@ class MemoryConfig(BaseModel):
 
 
 class CPUConfig(BaseModel):
-    """CPU configuration."""
+    """
+    Конфигурация CPU.
+    
+    Attributes:
+        cores: Количество ядер
+    """
     cores: int = 2
 
 
 class ExecutionConfig(BaseModel):
-    """Execution engine configuration."""
+    """
+    Конфигурация движка выполнения.
+    
+    Attributes:
+        parallelism: Уровень параллелизма
+        checkpointing: Настройки чекпоинтов
+        memory: Настройки памяти
+        cpu: Настройки CPU
+    """
     parallelism: int = 1
     checkpointing: Optional[CheckpointConfig] = None
     memory: Optional[MemoryConfig] = None
@@ -124,7 +171,7 @@ class ExecutionConfig(BaseModel):
 
 
 class ConnectorType(str, Enum):
-    """Data connector types."""
+    """Типы коннекторов данных."""
     KAFKA = "kafka"
     HDFS = "hdfs"
     S3 = "s3"
@@ -132,7 +179,18 @@ class ConnectorType(str, Enum):
 
 
 class KafkaConfig(BaseModel):
-    """Kafka connector configuration."""
+    """
+    Конфигурация Kafka коннектора.
+    
+    Attributes:
+        bootstrap_servers: Серверы Kafka
+        topic: Имя топика
+        format: Формат данных
+        properties: Дополнительные свойства
+        transactional_id: ID транзакции
+        scan_startup_mode: Режим запуска сканирования
+        sink_semantic: Семантика доставки
+    """
     bootstrap_servers: List[str]
     topic: str
     format: str = "json"
@@ -143,7 +201,16 @@ class KafkaConfig(BaseModel):
 
 
 class FileSystemConfig(BaseModel):
-    """File system connector configuration."""
+    """
+    Конфигурация файлового коннектора.
+    
+    Attributes:
+        path: Путь к данным
+        format: Формат файлов
+        partition_by: Колонки для партиционирования
+        overwrite: Перезаписывать ли данные
+        append: Добавлять ли данные
+    """
     path: str
     format: str = "parquet"
     partition_by: Optional[List[str]] = None
@@ -152,28 +219,50 @@ class FileSystemConfig(BaseModel):
 
 
 class YTTableConfig(BaseModel):
-    """Yandex Tsaurus table configuration."""
+    """
+    Конфигурация таблицы Yandex Tsaurus.
+    
+    Attributes:
+        cluster: Имя кластера
+        table_path: Путь к таблице
+        schema_inference: Автоопределение схемы
+    """
     cluster: str
     table_path: str
     schema_inference: Optional[bool] = None
 
 
 class SourceConnector(BaseModel):
-    """Source data connector."""
+    """
+    Коннектор источника данных.
+    
+    Attributes:
+        name: Имя коннектора
+        type: Тип коннектора
+        config: Конфигурация
+    """
     name: str
     type: ConnectorType
     config: Dict[str, Any]
 
 
 class SinkSemantics(str, Enum):
-    """Sink delivery semantics."""
+    """Семантика доставки в sink."""
     AT_LEAST_ONCE = "at_least_once"
     EXACTLY_ONCE = "exactly_once"
     AT_MOST_ONCE = "at_most_once"
 
 
 class SinkConnector(BaseModel):
-    """Sink data connector."""
+    """
+    Коннектор приёмника данных.
+    
+    Attributes:
+        name: Имя коннектора
+        type: Тип коннектора
+        semantics: Семантика доставки
+        config: Конфигурация
+    """
     name: str
     type: ConnectorType
     semantics: SinkSemantics = SinkSemantics.AT_LEAST_ONCE
@@ -181,19 +270,28 @@ class SinkConnector(BaseModel):
 
 
 class ModelRuntime(str, Enum):
-    """Model runtime environment."""
+    """Среда выполнения моделей."""
     PYTHON = "python"
     JAVA = "java"
 
 
 class CachePolicy(str, Enum):
-    """Model caching strategy."""
+    """Стратегия кеширования моделей."""
     LAZY_LOAD = "lazy_load"
     EAGER_LOAD = "eager_load"
 
 
 class ModelConfig(BaseModel):
-    """ML model configuration."""
+    """
+    Конфигурация ML-модели.
+    
+    Attributes:
+        name: Имя модели
+        runtime: Среда выполнения
+        requirements: Зависимости
+        cache_policy: Стратегия кеширования
+        storage_path: Путь к хранилищу
+    """
     name: str
     runtime: ModelRuntime = ModelRuntime.PYTHON
     requirements: List[str] = []
@@ -202,26 +300,48 @@ class ModelConfig(BaseModel):
 
 
 class OrchestrationType(str, Enum):
-    """Orchestration platform."""
+    """Платформы оркестрации."""
     AIRFLOW = "airflow"
     KUBERNETES = "kubernetes"
     NATIVE = "native"
 
 
 class ResourceRequirements(BaseModel):
-    """K8s resource requirements."""
+    """
+    Требования к ресурсам в Kubernetes.
+    
+    Attributes:
+        cpu: Требуемый CPU
+        memory: Требуемая память
+    """
     cpu: str
     memory: str
 
 
 class ResourceConfig(BaseModel):
-    """Resource configuration for orchestration."""
+    """
+    Конфигурация ресурсов для оркестрации.
+    
+    Attributes:
+        requests: Запрашиваемые ресурсы
+        limits: Предельные значения ресурсов
+    """
     requests: Optional[ResourceRequirements] = None
     limits: Optional[ResourceRequirements] = None
 
 
 class AirflowConfig(BaseModel):
-    """Airflow-specific orchestration config."""
+    """
+    Конфигурация Airflow.
+    
+    Attributes:
+        schedule_interval: Расписание выполнения
+        start_date: Дата начала
+        catchup: Выполнять ли пропущенные запуски
+        retries: Количество попыток
+        retry_delay: Задержка между попытками
+        operator_config: Настройки оператора
+    """
     schedule_interval: str = "@daily"
     start_date: str = "2024-01-01"
     catchup: bool = False
@@ -231,16 +351,34 @@ class AirflowConfig(BaseModel):
 
 
 class KubernetesConfig(BaseModel):
-    """Kubernetes-specific orchestration config."""
+    """
+    Конфигурация Kubernetes.
+    
+    Attributes:
+        namespace: Имя namespace
+        service_account: Service account
+        image: Docker образ
+        crd_type: Тип CRD (например, FlinkDeployment)
+        resources: Требования к ресурсам
+    """
     namespace: str = "default"
     service_account: Optional[str] = None
     image: str
-    crd_type: Optional[str] = None  # e.g., "FlinkDeployment"
+    crd_type: Optional[str] = None
     resources: Optional[ResourceConfig] = None
 
 
 class OrchestrationConfig(BaseModel):
-    """Orchestration configuration."""
+    """
+    Конфигурация оркестрации.
+    
+    Attributes:
+        type: Тип оркестратора
+        image: Docker образ
+        airflow: Настройки Airflow
+        kubernetes: Настройки Kubernetes
+        env_vars: Переменные окружения
+    """
     type: OrchestrationType
     image: Optional[str] = None
     airflow: Optional[AirflowConfig] = None
@@ -249,10 +387,20 @@ class OrchestrationConfig(BaseModel):
 
 
 class PlatformConfig(BaseModel):
-    """Complete platform configuration."""
-    meta: Dict[str, str]  # name, version, owner, description
-    target: Dict[str, str]  # platform, mode
+    """
+    Полная конфигурация платформы.
+    
+    Attributes:
+        meta: Метаданные (name, version, owner, description)
+        target: Целевая платформа и режим
+        execution: Настройки выполнения
+        connectors: Коннекторы (sources, sinks)
+        models: ML-модели
+        orchestration: Настройки оркестрации
+    """
+    meta: Dict[str, str]
+    target: Dict[str, str]
     execution: ExecutionConfig
-    connectors: Dict[str, List[Dict[str, Any]]]  # sources, sinks
+    connectors: Dict[str, List[Dict[str, Any]]]
     models: List[ModelConfig] = []
     orchestration: OrchestrationConfig
