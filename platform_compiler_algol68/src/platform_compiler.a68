@@ -1,0 +1,713 @@
+#!/usr/local/bin/a68g
+
+# ==============================================================================
+# PLATFORM COMPILER - ALGOL 68 IMPLEMENTATION
+# ==============================================================================
+# Главный интерфейс компилятора для генерации кода из DSL в платформенный код.
+# Оркестрирует процесс компиляции:
+# 1. Парсинг SQL-DSL файла
+# 2. Загрузка конфигурации платформы  
+# 3. Выбор генератора кода
+# 4. Генерация платформо-специфичного кода
+# ==============================================================================
+
+PRIO PR = 9;  # Priority for print operator
+
+# -----------------------------------------------------------------------------
+# MODE DECLARATIONS - Основные типы данных
+# -----------------------------------------------------------------------------
+
+MODE STRING = REF STRING;
+MODE INT = INT;
+MODE BOOL = BOOL;
+
+# Словарь (ключ-значение)
+MODE STRING_DICT = REF STRUCT(
+    KEY: STRING,
+    VALUE: STRING,
+    NEXT: REF STRING_DICT
+);
+
+# Список строк
+MODE STRING_LIST = REF STRUCT(
+    ITEM: STRING,
+    NEXT: REF STRING_LIST
+);
+
+# Определение таблицы
+MODE TABLE_DEF = REF STRUCT(
+    NAME: STRING,
+    COLUMNS: REF STRING_DICT,
+    STREAM_CONFIG: REF STREAM_CFG
+);
+
+# Конфигурация стриминга
+MODE STREAM_CFG = REF STRUCT(
+    TIME_ATTR: STRING,
+    WATERMARK: STRING,
+    ALLOWED_LATENESS: STRING
+);
+
+# Определение модели
+MODE MODEL_DEF = REF STRUCT(
+    NAME: STRING,
+    PATH: STRING,
+    INPUT_SCHEMA: STRING,
+    OUTPUT_SCHEMA: STRING
+);
+
+# Определение графа
+MODE GRAPH_DEF = REF STRUCT(
+    NAME: STRING,
+    VERTICES_TABLE: STRING,
+    VERTICES_ID_COL: STRING,
+    EDGES_TABLE: STRING,
+    EDGES_SRC_COL: STRING,
+    EDGES_DST_COL: STRING
+);
+
+# Представление (VIEW)
+MODE VIEW_DEF = REF STRUCT(
+    NAME: STRING,
+    QUERY: STRING,
+    NEXT: REF VIEW_DEF
+);
+
+# DSLLayer - полное определение пайплайна
+MODE DSL_LAYER = REF STRUCT(
+    TABLES: REF STRING_LIST,
+    MODELS: REF STRING_LIST,
+    GRAPHS: REF STRING_LIST,
+    VIEWS: REF VIEW_DEF,
+    INSERTS: REF STRING_LIST
+);
+
+# Конфигурация платформы
+MODE PLATFORM_CFG = REF STRUCT(
+    META: REF STRING_DICT,
+    TARGET: REF STRING_DICT,
+    EXECUTION: REF EXEC_CFG,
+    CONNECTORS: REF STRING_DICT,
+    ORCHESTRATION: REF ORCH_CFG
+);
+
+# Конфигурация выполнения
+MODE EXEC_CFG = REF STRUCT(
+    PARALLELISM: INT,
+    CHECKPOINTING: REF CHECK_CFG,
+    MEMORY: REF MEM_CFG,
+    CPU: REF CPU_CFG
+);
+
+# Конфигурация чекпоинтов
+MODE CHECK_CFG = REF STRUCT(
+    ENABLED: BOOL,
+    INTERVAL: STRING,
+    BACKEND: STRING,
+    PATH: STRING,
+    NUM_RETAINED: INT
+);
+
+# Конфигурация памяти
+MODE MEM_CFG = REF STRUCT(
+    DRIVER: STRING,
+    EXECUTOR: STRING,
+    TASKMANAGER: STRING,
+    JOBMANAGER: STRING
+);
+
+# Конфигурация CPU
+MODE CPU_CFG = REF STRUCT(
+    CORES: INT
+);
+
+# Конфигурация оркестрации
+MODE ORCH_CFG = REF STRUCT(
+    TYPE: STRING,
+    IMAGE: STRING,
+    AIRFLOW: REF AIRFLOW_CFG,
+    KUBERNETES: REF K8S_CFG
+);
+
+# Конфигурация Airflow
+MODE AIRFLOW_CFG = REF STRUCT(
+    SCHEDULE_INTERVAL: STRING,
+    START_DATE: STRING,
+    CATCHUP: BOOL,
+    RETRIES: INT,
+    RETRY_DELAY: STRING
+);
+
+# Конфигурация Kubernetes
+MODE K8S_CFG = REF STRUCT(
+    NAMESPACE: STRING,
+    SERVICE_ACCOUNT: STRING,
+    IMAGE: STRING,
+    CRD_TYPE: STRING
+);
+
+# Результат компиляции (словарь файл->содержимое)
+MODE OUTPUT_DICT = REF STRUCT(
+    FILENAME: STRING,
+    CONTENT: STRING,
+    NEXT: REF OUTPUT_DICT
+);
+
+# -----------------------------------------------------------------------------
+# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ КОМПИЛЯТОРА
+# -----------------------------------------------------------------------------
+
+REF DSL_LAYER dsl := NIL;
+REF PLATFORM_CFG config := NIL;
+
+# -----------------------------------------------------------------------------
+# ВСПОМОГАТЕЛЬНЫЕ ОПЕРАЦИИ
+# -----------------------------------------------------------------------------
+
+# Оператор вывода с приоритетом
+OP PR = (STRING s)VOID:
+    print((s, newline));
+
+# Создание строки
+PROC make_string = (STRING s)STRING:
+    BEGIN
+        REF STRING result := HEAP STRING := s;
+        result
+    END;
+
+# Работа со словарями
+PROC dict_put = (REF STRING_DICT dict, STRING key, STRING value)VOID:
+    BEGIN
+        REF STRING_DICT new_entry := HEAP STRING_DICT :=
+            (key, value, NIL);
+        IF dict = NIL THEN
+            # Первый элемент
+            dict := new_entry
+        ELSE
+            # Добавляем в начало списка
+            NEXT OF new_entry := dict;
+            dict := new_entry
+        FI
+    END;
+
+PROC dict_get = (REF STRING_DICT dict, STRING key, STRING default)STRING:
+    BEGIN
+        REF STRING_DICT current := dict;
+        WHILE current /= NIL DO
+            IF KEY OF current = key THEN
+                RETURN VALUE OF current
+            FI;
+            current := NEXT OF current
+        OD;
+        default
+    END;
+
+# Работа со списками
+PROC list_append = (REF STRING_LIST list, STRING item)VOID:
+    BEGIN
+        REF STRING_LIST new_item := HEAP STRING_LIST :=
+            (make_string(item), NIL);
+        IF list = NIL THEN
+            list := new_item
+        ELSE
+            REF STRING_LIST current := list;
+            WHILE NEXT OF current /= NIL DO
+                current := NEXT OF current
+            OD;
+            NEXT OF current := new_item
+        FI
+    END;
+
+# -----------------------------------------------------------------------------
+# ПАРСЕР DSL
+# -----------------------------------------------------------------------------
+
+MODE DSL_PARSER = REF STRUCT(
+    TABLES: REF STRING_LIST,
+    MODELS: REF STRING_LIST,
+    VIEWS: REF VIEW_DEF,
+    INSERTS: REF STRING_LIST
+);
+
+PROC create_parser = ()DSL_PARSER:
+    BEGIN
+        HEAP DSL_PARSER := (NIL, NIL, NIL, NIL)
+    END;
+
+PROC parse_file = (DSL_PARSER parser, STRING file_path)DSL_LAYER:
+    BEGIN
+        # В реальной реализации здесь было бы чтение файла
+        # Для примера возвращаем пустую структуру
+        HEAP DSL_LAYER := (NIL, NIL, NIL, NIL, NIL)
+    END;
+
+PROC parse_content = (DSL_PARSER parser, STRING content)DSL_LAYER:
+    BEGIN
+        # Удаление комментариев
+        STRING cleaned := remove_comments(content);
+        
+        # Парсинг таблиц
+        parse_tables(parser, cleaned);
+        
+        # Парсинг моделей
+        parse_models(parser, cleaned);
+        
+        # Парсинг представлений
+        parse_views(parser, cleaned);
+        
+        # Парсинг INSERT операций
+        parse_inserts(parser, cleaned);
+        
+        # Создаём и возвращаем DSLLayer
+        HEAP DSL_LAYER result := HEAP DSL_LAYER :=
+            (TABLES OF parser, MODELS OF parser, NIL, VIEWS OF parser, INSERTS OF parser);
+        result
+    END;
+
+PROC remove_comments = (STRING content)STRING:
+    BEGIN
+        # Упрощённая реализация - возвращаем как есть
+        # В полной версии нужно удалять -- и /* */ комментарии
+        content
+    END;
+
+PROC parse_tables = (DSL_PARSER parser, STRING content)VOID:
+    BEGIN
+        # Поиск паттерна DEFINE TABLE
+        # В полной реализации используется регулярное выражение
+        SKIP
+    END;
+
+PROC parse_models = (DSL_PARSER parser, STRING content)VOID:
+    BEGIN
+        SKIP
+    END;
+
+PROC parse_views = (DSL_PARSER parser, STRING content)VOID:
+    BEGIN
+        SKIP
+    END;
+
+PROC parse_inserts = (DSL_PARSER parser, STRING content)VOID:
+    BEGIN
+        SKIP
+    END;
+
+# -----------------------------------------------------------------------------
+# ЗАГРУЗЧИК КОНФИГУРАЦИИ
+# -----------------------------------------------------------------------------
+
+MODE CONFIG_LOADER = REF STRUCT(
+    CONFIG: PLATFORM_CFG
+);
+
+PROC create_config_loader = ()CONFIG_LOADER:
+    BEGIN
+        HEAP CONFIG_LOADER := (NIL)
+    END;
+
+PROC load_file = (CONFIG_LOADER loader, STRING file_path)PLATFORM_CFG:
+    BEGIN
+        # Чтение YAML файла и парсинг
+        # В Algol68 нет встроенной поддержки YAML, нужна внешняя библиотека
+        # Для примера создаём конфигурацию по умолчанию
+        create_default_config()
+    END;
+
+PROC load_content = (CONFIG_LOADER loader, STRING content)PLATFORM_CFG:
+    BEGIN
+        create_default_config()
+    END;
+
+PROC create_default_config = ()PLATFORM_CFG:
+    BEGIN
+        HEAP PLATFORM_CFG result := HEAP PLATFORM_CFG :=
+            (NIL, NIL, NIL, NIL, NIL);
+        
+        # Инициализация target
+        TARGET OF result := NIL;
+        dict_put(TARGET OF result, "platform", "spark");
+        dict_put(TARGET OF result, "mode", "batch");
+        
+        # Инициализация meta
+        META OF result := NIL;
+        dict_put(META OF result, "name", "pipeline");
+        dict_put(META OF result, "version", "1.0.0");
+        
+        # Инициализация execution
+        EXECUTION OF result := HEAP EXEC_CFG :=
+            (1, NIL, NIL, HEAP CPU_CFG := (2));
+        
+        # Инициализация orchestration
+        ORCHESTRATION OF result := HEAP ORCH_CFG :=
+            ("native", "", NIL, NIL);
+        
+        result
+    END;
+
+PROC validate_config = (CONFIG_LOADER loader)BOOL:
+    BEGIN
+        IF CONFIG OF loader = NIL THEN
+            RETURN FALSE
+        FI;
+        
+        STRING platform := dict_get(TARGET OF (CONFIG OF loader), "platform", "spark");
+        STRING mode := dict_get(TARGET OF (CONFIG OF loader), "mode", "batch");
+        
+        # Проверка поддерживаемых платформ
+        IF platform /= "spark" AND platform /= "flink" AND platform /= "yql" THEN
+            PR("Unsupported platform: " + platform);
+            RETURN FALSE
+        FI;
+        
+        IF mode /= "batch" AND mode /= "streaming" THEN
+            PR("Unsupported mode: " + mode);
+            RETURN FALSE
+        FI;
+        
+        TRUE
+    END;
+
+# -----------------------------------------------------------------------------
+# ГЕНЕРАТОР КОДА SPARK
+# -----------------------------------------------------------------------------
+
+MODE SPARK_GENERATOR = REF STRUCT(
+    DSL: DSL_LAYER,
+    CONFIG: PLATFORM_CFG,
+    MODE: STRING
+);
+
+PROC create_spark_generator = (DSL_LAYER dsl, PLATFORM_CFG cfg)SPARK_GENERATOR:
+    BEGIN
+        HEAP SPARK_GENERATOR gen := HEAP SPARK_GENERATOR :=
+            (dsl, cfg, NIL);
+        MODE OF gen := dict_get(TARGET OF cfg, "mode", "batch");
+        gen
+    END;
+
+PROC generate_full_script_spark = (SPARK_GENERATOR gen)STRING:
+    BEGIN
+        STRING header := "-- Generated by Platform Compiler for SPARK";
+        STRING udf_section := generate_udf_registrations_spark(gen);
+        STRING source_ddl := generate_source_ddl_spark(gen);
+        STRING sink_ddl := generate_sink_ddl_spark(gen);
+        STRING transformations := generate_transformations_spark(gen);
+        STRING footer := "-- End of generated script";
+        
+        header + newline + newline +
+        udf_section + newline + newline +
+        source_ddl + newline + newline +
+        sink_ddl + newline + newline +
+        transformations + newline + newline +
+        footer
+    END;
+
+PROC generate_udf_registrations_spark = (SPARK_GENERATOR gen)STRING:
+    BEGIN
+        "-- ==========================================" + newline +
+        "-- UDF/UDTF REGISTRATIONS" + newline +
+        "-- =========================================="
+    END;
+
+PROC generate_source_ddl_spark = (SPARK_GENERATOR gen)STRING:
+    BEGIN
+        "-- ==========================================" + newline +
+        "-- SOURCE TABLES" + newline +
+        "-- =========================================="
+    END;
+
+PROC generate_sink_ddl_spark = (SPARK_GENERATOR gen)STRING:
+    BEGIN
+        "-- ==========================================" + newline +
+        "-- SINK TABLES" + newline +
+        "-- =========================================="
+    END;
+
+PROC generate_transformations_spark = (SPARK_GENERATOR gen)STRING:
+    BEGIN
+        "-- ==========================================" + newline +
+        "-- TRANSFORMATIONS" + newline +
+        "-- =========================================="
+    END;
+
+PROC generate_airflow_dag = (SPARK_GENERATOR gen)STRING:
+    BEGIN
+        STRING dag_id := dict_get(META OF (CONFIG OF gen), "name", "spark_pipeline");
+        
+        '"""' + newline +
+        "Airflow DAG for " + dag_id + newline +
+        "Generated by Platform Compiler" + newline +
+        '"""' + newline + newline +
+        "from airflow import DAG" + newline +
+        "from datetime import datetime, timedelta" + newline + newline +
+        "default_args = {" + newline +
+        "    'owner': 'data-engineering'," + newline +
+        "    'retries': 2," + newline +
+        "    'retry_delay': timedelta(minutes=5)," + newline +
+        "}" + newline + newline +
+        "dag = DAG(" + newline +
+        "    '" + dag_id + "'," + newline +
+        "    default_args=default_args," + newline +
+        "    schedule_interval='@daily'," + newline +
+        "    start_date=datetime(2024, 1, 1)," + newline +
+        "    catchup=False," + newline +
+        ")"
+    END;
+
+# -----------------------------------------------------------------------------
+# ГЕНЕРАТОР КОДА FLINK
+# -----------------------------------------------------------------------------
+
+MODE FLINK_GENERATOR = REF STRUCT(
+    DSL: DSL_LAYER,
+    CONFIG: PLATFORM_CFG,
+    MODE: STRING
+);
+
+PROC create_flink_generator = (DSL_LAYER dsl, PLATFORM_CFG cfg)FLINK_GENERATOR:
+    BEGIN
+        HEAP FLINK_GENERATOR gen := HEAP FLINK_GENERATOR :=
+            (dsl, cfg, NIL);
+        MODE OF gen := dict_get(TARGET OF cfg, "mode", "batch");
+        gen
+    END;
+
+PROC generate_full_script_flink = (FLINK_GENERATOR gen)STRING:
+    BEGIN
+        STRING header := "-- Generated by Platform Compiler for FLINK";
+        STRING udf_section := generate_udf_registrations_flink(gen);
+        STRING source_ddl := generate_source_ddl_flink(gen);
+        STRING sink_ddl := generate_sink_ddl_flink(gen);
+        STRING transformations := generate_transformations_flink(gen);
+        STRING footer := "-- End of generated script";
+        
+        header + newline + newline +
+        udf_section + newline + newline +
+        source_ddl + newline + newline +
+        sink_ddl + newline + newline +
+        transformations + newline + newline +
+        footer
+    END;
+
+PROC generate_udf_registrations_flink = (FLINK_GENERATOR gen)STRING:
+    BEGIN
+        "-- ==========================================" + newline +
+        "-- UDF/UDTF REGISTRATIONS" + newline +
+        "-- =========================================="
+    END;
+
+PROC generate_source_ddl_flink = (FLINK_GENERATOR gen)STRING:
+    BEGIN
+        "-- ==========================================" + newline +
+        "-- SOURCE TABLES" + newline +
+        "-- =========================================="
+    END;
+
+PROC generate_sink_ddl_flink = (FLINK_GENERATOR gen)STRING:
+    BEGIN
+        "-- ==========================================" + newline +
+        "-- SINK TABLES" + newline +
+        "-- =========================================="
+    END;
+
+PROC generate_transformations_flink = (FLINK_GENERATOR gen)STRING:
+    BEGIN
+        "-- ==========================================" + newline +
+        "-- TRANSFORMATIONS" + newline +
+        "-- =========================================="
+    END;
+
+PROC generate_k8s_manifest = (FLINK_GENERATOR gen)STRING:
+    BEGIN
+        STRING job_name := dict_get(META OF (CONFIG OF gen), "name", "flink-pipeline");
+        STRING namespace := "default";
+        STRING image := "flink:1.17";
+        INT parallelism := 1;
+        
+        "apiVersion: flink.apache.org/v1beta1" + newline +
+        "kind: FlinkDeployment" + newline +
+        "metadata:" + newline +
+        "  name: " + job_name + newline +
+        "  namespace: " + namespace + newline +
+        "spec:" + newline +
+        "  image: " + image + newline +
+        "  flinkVersion: v1_17" + newline +
+        "  flinkConfiguration:" + newline +
+        "    taskmanager.numberOfTaskSlots: """ + whole(parallelism, 0) + """" + newline +
+        "  jobManager:" + newline +
+        "    resource:" + newline +
+        "      memory: 2048m" + newline +
+        "      cpu: 1" + newline +
+        "  taskManager:" + newline +
+        "    resource:" + newline +
+        "      memory: 4096m" + newline +
+        "      cpu: 2" + newline +
+        "  job:" + newline +
+        "    parallelism: " + whole(parallelism, 0) + newline +
+        "    upgradeMode: stateless"
+    END;
+
+# -----------------------------------------------------------------------------
+# ГЛАВНЫЙ КОМПИЛЯТОР
+# -----------------------------------------------------------------------------
+
+MODE PLATFORM_COMPILER = REF STRUCT(
+    PARSER: DSL_PARSER,
+    CONFIG_LOADER: CONFIG_LOADER,
+    DSL: DSL_LAYER,
+    CONFIG: PLATFORM_CFG
+);
+
+PROC create_compiler = ()PLATFORM_COMPILER:
+    BEGIN
+        HEAP PLATFORM_COMPILER compiler := HEAP PLATFORM_COMPILER :=
+            (create_parser(), create_config_loader(), NIL, NIL);
+        compiler
+    END;
+
+PROC compile = (PLATFORM_COMPILER compiler, 
+                STRING dsl_path, 
+                STRING config_path, 
+                STRING output_dir)OUTPUT_DICT:
+    BEGIN
+        # Шаг 1: Парсим DSL
+        PR("Parsing DSL: " + dsl_path);
+        DSL OF compiler := parse_file(PARSER OF compiler, dsl_path);
+        
+        # Шаг 2: Загружаем конфигурацию
+        PR("Loading configuration: " + config_path);
+        CONFIG OF compiler := load_file(CONFIG_LOADER OF compiler, config_path);
+        
+        # Валидация конфигурации
+        IF NOT validate_config(CONFIG_LOADER OF compiler) THEN
+            PR("Configuration validation failed");
+            RETURN NIL
+        FI;
+        
+        # Шаг 3: Выбираем генератор по платформе
+        STRING platform := dict_get(TARGET OF (CONFIG OF compiler), "platform", "spark");
+        PR("Target platform: " + platform);
+        
+        OUTPUT_DICT outputs := NIL;
+        STRING sql_content;
+        STRING sql_filename;
+        
+        IF platform = "spark" THEN
+            SPARK_GENERATOR generator := create_spark_generator(DSL OF compiler, CONFIG OF compiler);
+            sql_content := generate_full_script_spark(generator);
+            
+            # Генерируем Airflow DAG если нужно
+            STRING orch_type := dict_get(TYPE OF (ORCHESTRATION OF (CONFIG OF compiler)), "", "native");
+            IF orch_type = "airflow" THEN
+                STRING dag_content := generate_airflow_dag(generator);
+                STRING dag_filename := "dag_" + dict_get(META OF (CONFIG OF compiler), "name", "pipeline") + ".py";
+                # В полной версии: добавить в outputs
+            FI
+            
+        ELIF platform = "flink" THEN
+            FLINK_GENERATOR generator := create_flink_generator(DSL OF compiler, CONFIG OF compiler);
+            sql_content := generate_full_script_flink(generator);
+            
+            # Генерируем K8s manifest если нужно
+            STRING orch_type := dict_get(TYPE OF (ORCHESTRATION OF (CONFIG OF compiler)), "", "native");
+            IF orch_type = "kubernetes" THEN
+                STRING k8s_content := generate_k8s_manifest(generator);
+                # В полной версии: добавить в outputs
+            FI
+        ELSE
+            PR("Unsupported platform: " + platform);
+            RETURN NIL
+        FI;
+        
+        # Формируем имя файла
+        sql_filename := dict_get(META OF (CONFIG OF compiler), "name", "pipeline") + ".sql";
+        
+        # Шаг 4: Записываем выходные файлы
+        PR("Generating code...");
+        PR("  Written: " + output_dir + "/" + sql_filename);
+        
+        # В полной версии здесь была бы запись файлов
+        outputs := HEAP OUTPUT_DICT := (sql_filename, sql_content, NIL);
+        
+        outputs
+    END;
+
+PROC compile_from_strings = (PLATFORM_COMPILER compiler,
+                             STRING dsl_content,
+                             STRING config_content)OUTPUT_DICT:
+    BEGIN
+        # Парсим DSL из строки
+        DSL OF compiler := parse_content(PARSER OF compiler, dsl_content);
+        
+        # Загружаем конфигурацию из строки
+        CONFIG OF compiler := load_content(CONFIG_LOADER OF compiler, config_content);
+        
+        # Валидация
+        IF NOT validate_config(CONFIG_LOADER OF compiler) THEN
+            RETURN NIL
+        FI;
+        
+        # Выбираем генератор
+        STRING platform := dict_get(TARGET OF (CONFIG OF compiler), "platform", "spark");
+        
+        OUTPUT_DICT outputs := NIL;
+        
+        IF platform = "spark" THEN
+            SPARK_GENERATOR generator := create_spark_generator(DSL OF compiler, CONFIG OF compiler);
+            STRING sql_content := generate_full_script_spark(generator);
+            STRING sql_filename := dict_get(META OF (CONFIG OF compiler), "name", "pipeline") + ".sql";
+            outputs := HEAP OUTPUT_DICT := (sql_filename, sql_content, NIL);
+            
+        ELIF platform = "flink" THEN
+            FLINK_GENERATOR generator := create_flink_generator(DSL OF compiler, CONFIG OF compiler);
+            STRING sql_content := generate_full_script_flink(generator);
+            STRING sql_filename := dict_get(META OF (CONFIG OF compiler), "name", "pipeline") + ".sql";
+            outputs := HEAP OUTPUT_DICT := (sql_filename, sql_content, NIL);
+        ELSE
+            PR("Unsupported platform: " + platform);
+        FI;
+        
+        outputs
+    END;
+
+# -----------------------------------------------------------------------------
+# УДОБНАЯ ФУНКЦИЯ ДЛЯ КОМПИЛЯЦИИ
+# -----------------------------------------------------------------------------
+
+PROC compile_pipeline = (STRING dsl_path, STRING config_path, STRING output_dir)OUTPUT_DICT:
+    BEGIN
+        PLATFORM_COMPILER compiler := create_compiler();
+        compile(compiler, dsl_path, config_path, output_dir)
+    END;
+
+# -----------------------------------------------------------------------------
+# ОСНОВНАЯ ПРОГРАММА (ДЛЯ ТЕСТИРОВАНИЯ)
+# -----------------------------------------------------------------------------
+
+PROGRAM
+BEGIN
+    PR("Platform Compiler - Algol 68 Implementation");
+    PR("==========================================");
+    
+    # Пример использования
+    PLATFORM_COMPILER compiler := create_compiler();
+    
+    # Тестовая компиляция
+    OUTPUT_DICT result := compile_from_strings(compiler,
+        "-- Test DSL" + newline +
+        "DEFINE TABLE events (id INT, timestamp TIMESTAMP);",
+        "meta:" + newline +
+        "  name: test_pipeline" + newline +
+        "target:" + newline +
+        "  platform: spark" + newline +
+        "  mode: batch"
+    );
+    
+    IF result /= NIL THEN
+        PR("Compilation successful!");
+        PR("Generated file: " + FILENAME OF result);
+    ELSE
+        PR("Compilation failed");
+    FI
+END

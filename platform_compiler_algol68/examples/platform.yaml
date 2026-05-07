@@ -1,0 +1,108 @@
+# Конфигурация платформы для Platform Compiler
+# Определяет инфраструктурные параметры выполнения
+
+meta:
+  name: fraud-detection-pipeline
+  version: 1.0.0
+  owner: data-engineering-team
+  description: Пайплайн детекции фрода в реальном времени
+
+target:
+  platform: spark  # spark, flink, yql
+  mode: streaming  # batch, streaming
+
+execution:
+  parallelism: 4
+  
+  checkpointing:
+    enabled: true
+    interval: 60s
+    backend: rocksdb
+    path: hdfs:///checkpoints/fraud-detection
+    num_retained: 3
+  
+  memory:
+    driver: 4g
+    executor: 8g
+    taskmanager: 4096m
+    jobmanager: 2048m
+  
+  cpu:
+    cores: 4
+
+connectors:
+  sources:
+    - name: raw_events
+      type: kafka
+      config:
+        bootstrap_servers:
+          - kafka-1.example.com:9092
+          - kafka-2.example.com:9092
+          - kafka-3.example.com:9092
+        topic: raw-events
+        format: json
+        scan_startup_mode: latest-offset
+        properties:
+          group.id: fraud-detection-consumer
+          auto.offset.reset: latest
+    
+    - name: user_profiles
+      type: hdfs
+      config:
+        path: /data/user_profiles
+        format: parquet
+        partition_by:
+          - country
+  
+  sinks:
+    - name: events_hourly
+      type: kafka
+      semantics: exactly_once
+      config:
+        bootstrap_servers:
+          - kafka-1.example.com:9092
+          - kafka-2.example.com:9092
+        topic: analytics-events-hourly
+        format: json
+        transactional_id: fraud-detection-tx
+    
+    - name: fraud_predictions
+      type: s3
+      config:
+        path: s3://analytics-bucket/fraud-predictions/
+        format: parquet
+        partition_by:
+          - dt
+          - hour
+        overwrite: false
+
+models:
+  - name: fraud_detector
+    runtime: python
+    requirements:
+      - scikit-learn==1.3.0
+      - numpy==1.24.0
+      - pandas==2.0.0
+    cache_policy: eager_load
+    storage_path: hdfs:///models/fraud_detector_v2.pkl
+
+orchestration:
+  type: airflow  # airflow, kubernetes, native
+  image: spark:3.4.1
+  
+  # Настройки для Airflow
+  schedule_interval: "*/15 * * * *"  # Каждые 15 минут
+  start_date: "2024-01-01"
+  catchup: false
+  retries: 3
+  retry_delay: 5m
+  
+  operator_config:
+    conf:
+      spark.sql.shuffle.partitions: "200"
+      spark.executor.instances: "4"
+    
+  env_vars:
+    SPARK_HOME: /opt/spark
+    HADOOP_CONF_DIR: /etc/hadoop/conf
+    KAFKA_BOOTSTRAP_SERVERS: kafka-1.example.com:9092,kafka-2.example.com:9092
